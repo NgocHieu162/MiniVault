@@ -1,6 +1,0 @@
-{
-  "kdf": "argon2id",
-  "kdf_salt_b64": "rQRM5f4EPK8b6mTH51IhlQ==",
-  "encrypted_dek_b64": "fSnN75MLrSdUdY1OZmgM6oRFT6Y5I/0geh+wt9luEatH+oaZDEfAQvqNcAMkbu+RCSRfOQt2h2io47YQ",
-  "status": "locked"
-}
