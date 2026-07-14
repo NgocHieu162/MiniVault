@@ -121,6 +121,54 @@ def run_tests():
     assert result_rsa_bad is False
     print(f"  [OK] verify (tampered message): {result_rsa_bad} (correctly rejected)")
 
+    # --- Advanced Feature: Key Rotation ---
+    print("\n[ADVANCED] Key Rotation")
+
+    transit.create_key("rotate-key", OWNER)
+    print("  [OK] create_key: 'rotate-key' created at version 1")
+
+    # Encrypt plaintext with version 1
+    plaintext_v1 = b"Secret encrypted by key version 1"
+    cipher_v1 = transit.encrypt("rotate-key", plaintext_v1, OWNER)
+    assert ":1:" in cipher_v1, "Ciphertext must contain version number ':1:'"
+    print(f"  [OK] encrypt with v1: {cipher_v1[:55]}...")
+
+    # Rotate the key -> version 2
+    new_ver = transit.rotate_key("rotate-key", OWNER)
+    assert new_ver == 2
+    print(f"  [OK] rotate_key: now at version {new_ver}")
+
+    # Encrypt new plaintext with version 2
+    plaintext_v2 = b"Secret encrypted by key version 2"
+    cipher_v2 = transit.encrypt("rotate-key", plaintext_v2, OWNER)
+    assert ":2:" in cipher_v2, "Ciphertext must contain version number ':2:'"
+    print(f"  [OK] encrypt with v2: {cipher_v2[:55]}...")
+
+    # Decrypt ciphertext v1 using old key version (MUST still work)
+    recovered_v1 = transit.decrypt("rotate-key", cipher_v1, OWNER)
+    assert recovered_v1 == plaintext_v1
+    print(f"  [OK] decrypt v1 ciphertext (backward compat): '{recovered_v1.decode()}'")
+
+    # Decrypt ciphertext v2 using new key version
+    recovered_v2 = transit.decrypt("rotate-key", cipher_v2, OWNER)
+    assert recovered_v2 == plaintext_v2
+    print(f"  [OK] decrypt v2 ciphertext: '{recovered_v2.decode()}'")
+
+    # Rotate again -> version 3
+    ver3 = transit.rotate_key("rotate-key", OWNER)
+    assert ver3 == 3
+    print(f"  [OK] rotate_key again: now at version {ver3}")
+
+    # Both old ciphertexts (v1 and v2) must still decrypt correctly
+    assert transit.decrypt("rotate-key", cipher_v1, OWNER) == plaintext_v1
+    assert transit.decrypt("rotate-key", cipher_v2, OWNER) == plaintext_v2
+    print(f"  [OK] all old ciphertexts still decrypt after v3 rotation")
+
+    # New encryption uses version 3
+    cipher_v3 = transit.encrypt("rotate-key", b"New data at v3", OWNER)
+    assert ":3:" in cipher_v3
+    print(f"  [OK] new encryption uses latest version 3")
+
     print("\n" + "=" * 60)
     print("ALL TESTS PASSED [OK]")
     print("=" * 60)

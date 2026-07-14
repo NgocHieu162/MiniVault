@@ -103,14 +103,15 @@ class TransitEngine:
         if key_name in data["keys"]:
             raise KeyAlreadyExistsError(f"Key '{key_name}' already exists")
 
-        # Generate AES-256 key and protect it with the master DEK
+        # Generate AES-256 key (version 1) and protect it with the master DEK
         aes_key = AESGCM.generate_key(bit_length=256)
         encrypted_key_b64 = self._encrypt_bytes_with_dek(aes_key)
 
         record = KeyRecord(
             key_name=key_name,
             owner_email=owner_email,
-            encrypted_key_b64=encrypted_key_b64,
+            keys_by_version={"1": encrypted_key_b64},
+            latest_version=1,
         )
         data["keys"][key_name] = record.to_dict()
         self._save_storage(data)
@@ -155,6 +156,44 @@ class TransitEngine:
         data["keys"][key_name]["is_revoked"] = True
         self._save_storage(data)
 
+    def rotate_key(self, key_name: str, owner_email: str) -> int:
+        """Rotates a named key by generating a new key version.
+
+        The old key versions are retained so existing ciphertexts can still be decrypted.
+        All subsequent encrypt() calls will use the new latest version.
+
+        Args:
+            key_name: The name of the key to rotate.
+            owner_email: The email of the caller (must match the key owner).
+
+        Returns:
+            The new latest version number (integer).
+
+        Raises:
+            VaultLockedError: If the vault is locked.
+            KeyNotFoundError: If the key does not exist.
+            KeyRevokedError: If the key has already been revoked.
+            PermissionDeniedError: If the caller is not the owner.
+        """
+        # Ensure vault is unlocked before generating a new key version
+        _ = self.vault_manager.get_dek()
+
+        data = self._load_storage()
+        record = self._get_key_record(key_name)
+        self._assert_owner(record.owner_email, owner_email)
+        if record.is_revoked:
+            raise KeyRevokedError(f"Key '{key_name}' has been revoked and cannot be rotated")
+
+        # Generate a brand-new AES-256 key for the next version
+        new_aes_key = AESGCM.generate_key(bit_length=256)
+        new_encrypted_b64 = self._encrypt_bytes_with_dek(new_aes_key)
+        new_version = record.latest_version + 1
+
+        data["keys"][key_name]["keys_by_version"][str(new_version)] = new_encrypted_b64
+        data["keys"][key_name]["latest_version"] = new_version
+        self._save_storage(data)
+        return new_version
+
     # --- Feature 2.2: Encrypt/Decrypt as a Service ---
 
     def encrypt(self, key_name: str, plaintext: bytes, owner_email: str) -> str:
@@ -179,14 +218,20 @@ class TransitEngine:
         if record.is_revoked:
             raise KeyRevokedError(f"Key '{key_name}' has been revoked")
 
+        # Always encrypt with the latest key version
+        version = str(record.latest_version)
+        if version not in record.keys_by_version:
+            raise KeyNotFoundError(f"Key version '{version}' not found for key '{key_name}'")
+
         # Decrypt the named AES key using the master DEK
-        named_key = self._decrypt_bytes_with_dek(record.encrypted_key_b64)
+        named_key = self._decrypt_bytes_with_dek(record.keys_by_version[version])
 
         # Encrypt the plaintext with a fresh nonce using the named AES key
         nonce = os.urandom(NONCE_SIZE)
         ciphertext = AESGCM(named_key).encrypt(nonce, plaintext, associated_data=None)
         payload = base64.b64encode(nonce + ciphertext).decode("ascii")
-        return f"vault:{key_name}:{payload}"
+        # Include the version in the ciphertext tag: vault:<key_name>:<version>:<payload>
+        return f"vault:{key_name}:{version}:{payload}"
 
     def decrypt(self, key_name: str, ciphertext: str, owner_email: str) -> bytes:
         """Decrypts a 'vault' formatted ciphertext string using the named symmetric key.
@@ -212,16 +257,34 @@ class TransitEngine:
         if record.is_revoked:
             raise KeyRevokedError(f"Key '{key_name}' has been revoked")
 
-        # Validate and parse the vault ciphertext format
+        # Parse the vault ciphertext format.
+        # Supports both old format: vault:<key_name>:<payload>
+        # and new versioned format:  vault:<key_name>:<version>:<payload>
         parts = ciphertext.split(":")
-        if len(parts) != 3 or parts[0] != "vault" or parts[1] != key_name:
-            raise ValueError(f"Invalid ciphertext format. Expected 'vault:{key_name}:<base64>'")
+        if len(parts) == 3 and parts[0] == "vault" and parts[1] == key_name:
+            # Old format (version 1 assumed for backward compatibility)
+            version = "1"
+            payload_b64 = parts[2]
+        elif len(parts) == 4 and parts[0] == "vault" and parts[1] == key_name:
+            # New versioned format
+            version = parts[2]
+            payload_b64 = parts[3]
+        else:
+            raise ValueError(
+                f"Invalid ciphertext format. Expected 'vault:{key_name}:<version>:<base64>'"
+            )
 
-        payload = base64.b64decode(parts[2])
+        if version not in record.keys_by_version:
+            raise KeyNotFoundError(
+                f"Key version '{version}' not found for key '{key_name}'. "
+                f"Available versions: {list(record.keys_by_version.keys())}"
+            )
+
+        payload = base64.b64decode(payload_b64)
         nonce, ct = payload[:NONCE_SIZE], payload[NONCE_SIZE:]
 
-        # Decrypt the named AES key using the master DEK, then decrypt plaintext
-        named_key = self._decrypt_bytes_with_dek(record.encrypted_key_b64)
+        # Decrypt the specific version of the named AES key using the master DEK
+        named_key = self._decrypt_bytes_with_dek(record.keys_by_version[version])
         return AESGCM(named_key).decrypt(nonce, ct, associated_data=None)
 
     # --- Feature 2.4: Sign & Verify as a Service ---
