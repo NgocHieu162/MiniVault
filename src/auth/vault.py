@@ -30,6 +30,9 @@ class VaultManager:
     def is_initialized(self) -> bool:
         return self.storage.exists()
 
+    def is_unlocked(self) -> bool:
+        return self._status == "unlocked"
+
     def init_vault(self, passphrase: str) -> None:
         """First run only. Fails if a vault already exists on disk."""
         if self.is_initialized():
