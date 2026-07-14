@@ -5,7 +5,7 @@ from typing import Optional
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from .exceptions import (
+from ..auth.exceptions import (
     InvalidPassphraseError,
     VaultAlreadyInitializedError,
     VaultLockedError,
