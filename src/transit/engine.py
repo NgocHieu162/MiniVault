@@ -1,13 +1,17 @@
 import base64
 import json
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-from src.auth.exceptions import VaultLockedError
-from src.auth.vault import VaultManager
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519, padding, rsa
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+from src.core.vault import VaultManager
 
 from .exceptions import (
-    InvalidKeyUsageException,
+    InvalidKeyUsageError,
     KeyAlreadyExistsError,
     KeyNotFoundError,
     KeyRevokedError,
@@ -15,20 +19,15 @@ from .exceptions import (
 )
 from .models import KeyRecord, SigningKeyRecord
 
+NONCE_SIZE = 12  # 96-bit nonce, standard size for AES-GCM
+
 
 class TransitEngine:
-    """The core engine responsible for cryptographic operations on named keys.
-    
-    This includes creating/listing/revoking keys, encrypting/decrypting data,
-    and signing/verifying messages.
-    """
-
     def __init__(self, vault_manager: VaultManager, storage_path: str = "data/transit_keys.json"):
         self.vault_manager = vault_manager
         self.storage_path = storage_path
 
     def _load_storage(self) -> Dict[str, Any]:
-        """Loads the raw metadata dictionary from the storage file."""
         if not os.path.exists(self.storage_path):
             return {"keys": {}, "signing_keys": {}}
         try:
@@ -38,7 +37,6 @@ class TransitEngine:
             return {"keys": {}, "signing_keys": {}}
 
     def _save_storage(self, data: Dict[str, Any]) -> None:
-        """Saves the metadata dictionary atomically to the storage file."""
         directory = os.path.dirname(self.storage_path) or "."
         os.makedirs(directory, exist_ok=True)
         tmp_path = self.storage_path + ".tmp"
@@ -46,171 +44,79 @@ class TransitEngine:
             json.dump(data, f, indent=2)
         os.replace(tmp_path, self.storage_path)
 
-    # --- Feature 2.1: Named Key Management ---
+    def _get_key_record(self, key_name: str) -> KeyRecord:
+        data = self._load_storage()
+        if key_name not in data["keys"]:
+            raise KeyNotFoundError(f"Key '{key_name}' not found")
+        return KeyRecord.from_dict(data["keys"][key_name])
+
+    def _assert_owner(self, record_email: str, caller_email: str) -> None:
+        if record_email != caller_email:
+            raise PermissionDeniedError(
+                f"Access denied: caller '{caller_email}' is not the owner of this key"
+            )
+
+    def _encrypt_bytes_with_dek(self, plaintext: bytes) -> str:
+        dek = self.vault_manager.get_dek()
+        nonce = os.urandom(NONCE_SIZE)
+        ciphertext = AESGCM(dek).encrypt(nonce, plaintext, associated_data=None)
+        return base64.b64encode(nonce + ciphertext).decode("ascii")
+
+    def _decrypt_bytes_with_dek(self, encrypted_b64: str) -> bytes:
+        dek = self.vault_manager.get_dek()
+        raw = base64.b64decode(encrypted_b64)
+        nonce, ciphertext = raw[:NONCE_SIZE], raw[NONCE_SIZE:]
+        return AESGCM(dek).decrypt(nonce, ciphertext, associated_data=None)
 
     def create_key(self, key_name: str, owner_email: str) -> None:
-        """Generates a new AES-256 key, encrypts it with the Vault DEK, and stores it.
-        
-        Args:
-            key_name: The unique identifier for the key.
-            owner_email: The email of the user creating and owning the key.
-            
-        Raises:
-            VaultLockedError: If the vault is locked.
-            KeyAlreadyExistsError: If a key with this name already exists.
-        """
-        # Ensure vault is unlocked (calling get_dek will raise VaultLockedError if locked)
-        _ = self.vault_manager.get_dek()
-
-        # TODO: Implement key generation (AES-256), encryption with DEK,
-        # storage update, and saving to disk.
-        raise NotImplementedError("create_key is not implemented yet")
-
-    def list_keys(self, owner_email: str) -> List[Dict[str, Any]]:
-        """Lists metadata of all keys owned by the specified email.
-        
-        Args:
-            owner_email: The email of the key owner.
-            
-        Returns:
-            A list of dictionaries containing key metadata (strictly NO plaintext key material).
-        """
-        # TODO: Filter and return key metadata.
-        raise NotImplementedError("list_keys is not implemented yet")
-
-    def revoke_key(self, key_name: str, owner_email: str) -> None:
-        """Revokes a key, making it unusable for further cryptographic operations.
-        
-        Args:
-            key_name: The name of the key to revoke.
-            owner_email: The email of the caller (must match the key owner).
-            
-        Raises:
-            KeyNotFoundError: If the key does not exist.
-            PermissionDeniedError: If the caller is not the owner of the key.
-        """
-        # TODO: Mark the key as revoked in storage.
-        raise NotImplementedError("revoke_key is not implemented yet")
-
-    # --- Feature 2.2: Encrypt/Decrypt as a Service ---
-
-    def encrypt(self, key_name: str, plaintext: bytes, owner_email: str) -> str:
-        """Encrypts plaintext bytes using the named symmetric key.
-        
-        Args:
-            key_name: The name of the key to encrypt with.
-            plaintext: The raw bytes to encrypt.
-            owner_email: The email of the caller (must match the key owner).
-            
-        Returns:
-            A ciphertext string formatted as 'vault:<key_name>:<base64_payload>'
-            
-        Raises:
-            VaultLockedError: If the vault is locked.
-            KeyNotFoundError: If the key does not exist.
-            KeyRevokedError: If the key is revoked.
-            PermissionDeniedError: If the caller is not the owner (Access Control).
-        """
         # Ensure vault is unlocked
         _ = self.vault_manager.get_dek()
+        
+        data = self._load_storage()
+        if key_name in data["keys"]:
+            raise KeyAlreadyExistsError(f"Key '{key_name}' already exists")
 
-        # TODO: Retrieve key, decrypt key with DEK, encrypt plaintext with AESGCM,
-        # and format/return the final ciphertext string.
+        aes_key = AESGCM.generate_key(bit_length=256)
+        encrypted_key_b64 = self._encrypt_bytes_with_dek(aes_key)
+
+        record = KeyRecord(
+            key_name=key_name,
+            owner_email=owner_email,
+            encrypted_key_b64=encrypted_key_b64,
+        )
+        data["keys"][key_name] = record.to_dict()
+        self._save_storage(data)
+
+    def list_keys(self, owner_email: str) -> List[Dict[str, Any]]:
+        data = self._load_storage()
+        result = []
+        for raw in data["keys"].values():
+            if raw["owner_email"] == owner_email:
+                result.append({
+                    "key_name": raw["key_name"],
+                    "owner_email": raw["owner_email"],
+                    "created_at": raw["created_at"],
+                    "is_revoked": raw["is_revoked"],
+                })
+        return result
+
+    def revoke_key(self, key_name: str, owner_email: str) -> None:
+        data = self._load_storage()
+        record = self._get_key_record(key_name)
+        data["keys"][key_name]["is_revoked"] = True
+        self._save_storage(data)
+
+    def encrypt(self, key_name: str, plaintext: bytes, owner_email: str) -> str:
         raise NotImplementedError("encrypt is not implemented yet")
 
     def decrypt(self, key_name: str, ciphertext: str, owner_email: str) -> bytes:
-        """Decrypts a 'vault' formatted ciphertext string using the named symmetric key.
-        
-        Args:
-            key_name: The name of the key to decrypt with.
-            ciphertext: The ciphertext string.
-            owner_email: The email of the caller (must match the key owner).
-            
-        Returns:
-            The decrypted plaintext bytes.
-            
-        Raises:
-            VaultLockedError: If the vault is locked.
-            KeyNotFoundError: If the key does not exist.
-            KeyRevokedError: If the key is revoked.
-            PermissionDeniedError: If the caller is not the owner.
-            InvalidTag: If decryption fails (corrupted data or tag mismatch).
-        """
-        # Ensure vault is unlocked
-        _ = self.vault_manager.get_dek()
-
-        # TODO: Parse ciphertext, retrieve key, decrypt key with DEK,
-        # decrypt ciphertext with AESGCM, and return plaintext.
         raise NotImplementedError("decrypt is not implemented yet")
 
-    # --- Feature 2.4: Sign & Verify as a Service ---
-
     def create_signing_key(self, key_name: str, owner_email: str, algorithm: str = "Ed25519") -> None:
-        """Generates an asymmetric key pair, encrypts the private key with DEK, and stores both.
-        
-        Args:
-            key_name: The unique identifier for the signing key.
-            owner_email: The email of the user creating and owning the key.
-            algorithm: The asymmetric algorithm, either 'RSA-2048' or 'Ed25519'.
-            
-        Raises:
-            VaultLockedError: If the vault is locked.
-            KeyAlreadyExistsError: If a key with this name already exists.
-            ValueError: If the requested algorithm is unsupported.
-        """
-        # Ensure vault is unlocked
-        _ = self.vault_manager.get_dek()
-
-        if algorithm not in ("RSA-2048", "Ed25519"):
-            raise ValueError(f"Unsupported algorithm: {algorithm}")
-
-        # TODO: Generate asymmetric key pair, encrypt private key with DEK,
-        # export public key in PEM format, and save to storage.
         raise NotImplementedError("create_signing_key is not implemented yet")
 
     def sign(self, key_name: str, message: bytes, owner_email: str) -> bytes:
-        """Signs a message using the private key of the named asymmetric key.
-        
-        Args:
-            key_name: The name of the signing key.
-            message: The message bytes to sign.
-            owner_email: The email of the caller (must match the key owner).
-            
-        Returns:
-            The raw signature bytes.
-            
-        Raises:
-            VaultLockedError: If the vault is locked.
-            KeyNotFoundError: If the key does not exist.
-            KeyRevokedError: If the key is revoked.
-            PermissionDeniedError: If the caller is not the owner.
-        """
-        # Ensure vault is unlocked
-        _ = self.vault_manager.get_dek()
-
-        # TODO: Retrieve signing key, decrypt private key with DEK,
-        # perform sign operation using the appropriate algorithm, and return signature.
         raise NotImplementedError("sign is not implemented yet")
 
     def verify(self, key_name: str, message: bytes, signature: bytes, owner_email: str) -> bool:
-        """Verifies a signature against a message using the public key of the named asymmetric key.
-        
-        Args:
-            key_name: The name of the signing key.
-            message: The message bytes.
-            signature: The signature bytes to verify.
-            owner_email: The email of the caller (must match the key owner).
-            
-        Returns:
-            True if the signature is valid, False otherwise (safely handles verification failures).
-            
-        Raises:
-            KeyNotFoundError: If the key does not exist.
-            PermissionDeniedError: If the caller is not the owner.
-        """
-        # Note: Verification does NOT require the vault to be unlocked since
-        # public keys are stored in plaintext.
-        
-        # TODO: Retrieve signing key, load public key from PEM,
-        # perform verification, return True/False without throwing crash exceptions.
         raise NotImplementedError("verify is not implemented yet")
