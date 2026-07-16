@@ -1,11 +1,9 @@
 """
 Manual integration test script for the TransitEngine.
-Run with: .\\venv\\Scripts\\python.exe tests\\test_transit_manual.py
+Run from project root with: .\\venv\\Scripts\\python.exe tests\\test_transit_manual.py
 """
 import os
-import sys
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.core.vault import VaultManager
 from src.storage.vault_storage import VaultStorage

@@ -106,8 +106,8 @@ def test_decrypt_tampered_ciphertext_fails(transit_engine):
     tampered_parts = parts[:3] + [base64.b64encode(payload).decode("ascii")]
     tampered_ciphertext = ":".join(tampered_parts)
     
-    with pytest.raises((InvalidTag, Exception)):
-         transit_engine.decrypt("my-key", tampered_ciphertext, OWNER)
+    with pytest.raises(InvalidTag):
+        transit_engine.decrypt("my-key", tampered_ciphertext, OWNER)
 
 
 # ---------------------------------------------------------------------
@@ -173,9 +173,9 @@ def test_list_keys_private_key_safety(transit_engine):
     # Check stored metadata
     record = data["signing_keys"]["sig-key"]
     assert "encrypted_private_key_b64" in record
-    # Ensure public access never exposes private materials
-    with pytest.raises(AttributeError):
-        _ = record.private_key
+    # Ensure no plaintext private key material is ever stored in the record
+    assert "private_key" not in record
+    assert "private_key_pem" not in record
 
 
 # ---------------------------------------------------------------------

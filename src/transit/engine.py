@@ -39,8 +39,11 @@ class TransitEngine:
         """Loads the raw metadata dictionary from the storage file."""
         if not os.path.exists(self.storage_path):
             return {"keys": {}, "signing_keys": {}}
-        with open(self.storage_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(self.storage_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return {"keys": {}, "signing_keys": {}}
 
     def _save_storage(self, data: Dict[str, Any]) -> None:
         """Saves the metadata dictionary atomically to the storage file."""
@@ -117,7 +120,7 @@ class TransitEngine:
         self._save_storage(data)
 
     def list_keys(self, owner_email: str) -> List[Dict[str, Any]]:
-        """Lists metadata of all active keys owned by the specified email.
+        """Lists metadata of all keys (including revoked) owned by the specified email.
 
         Args:
             owner_email: The email of the key owner.
@@ -189,8 +192,16 @@ class TransitEngine:
         new_encrypted_b64 = self._encrypt_bytes_with_dek(new_aes_key)
         new_version = record.latest_version + 1
 
-        data["keys"][key_name]["keys_by_version"][str(new_version)] = new_encrypted_b64
-        data["keys"][key_name]["latest_version"] = new_version
+        # Migrate legacy raw dict (old format) to versioned format in-place before updating.
+        # KeyRecord.from_dict() migrates in-memory only; the raw dict in storage may
+        # still use the old single 'encrypted_key_b64' field without 'keys_by_version'.
+        raw_key_entry = data["keys"][key_name]
+        if "keys_by_version" not in raw_key_entry:
+            raw_key_entry["keys_by_version"] = {"1": raw_key_entry.pop("encrypted_key_b64")}
+            raw_key_entry["latest_version"] = 1
+
+        raw_key_entry["keys_by_version"][str(new_version)] = new_encrypted_b64
+        raw_key_entry["latest_version"] = new_version
         self._save_storage(data)
         return new_version
 
@@ -205,7 +216,7 @@ class TransitEngine:
             owner_email: The email of the caller (must match the key owner).
 
         Returns:
-            A ciphertext string formatted as 'vault:<key_name>:<base64(nonce + ciphertext)>'.
+            A ciphertext string formatted as 'vault:<key_name>:<version>:<base64(nonce + ciphertext)>'.
 
         Raises:
             VaultLockedError: If the vault is locked.
@@ -238,7 +249,8 @@ class TransitEngine:
 
         Args:
             key_name: The name of the key to decrypt with.
-            ciphertext: The ciphertext string in 'vault:<key_name>:<base64>' format.
+            ciphertext: The ciphertext string in 'vault:<key_name>:<payload_b64>' (legacy)
+                        or 'vault:<key_name>:<version>:<payload_b64>' (versioned) format.
             owner_email: The email of the caller (must match the key owner).
 
         Returns:
@@ -271,7 +283,8 @@ class TransitEngine:
             payload_b64 = parts[3]
         else:
             raise ValueError(
-                f"Invalid ciphertext format. Expected 'vault:{key_name}:<version>:<base64>'"
+                f"Invalid ciphertext format. Expected "
+                f"'vault:{key_name}:<payload_b64>' or 'vault:{key_name}:<version>:<payload_b64>'"
             )
 
         if version not in record.keys_by_version:
@@ -423,5 +436,8 @@ class TransitEngine:
             else:
                 raise InvalidKeyUsageError(f"Unsupported algorithm for verify: '{record.algorithm}'")
             return True
-        except (InvalidSignature, Exception):
+        except InvalidSignature:
+            return False
+        except (TypeError, ValueError):
+            # Handle cases such as malformed signature bytes
             return False
