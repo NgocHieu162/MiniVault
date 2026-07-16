@@ -59,13 +59,39 @@ def test_list_keys_metadata_safety(transit_engine):
     keys = transit_engine.list_keys(OWNER)
     assert "encrypted_key_b64" not in keys[0]
     assert "keys_by_version" not in keys[0]
+    # key_usage phải được hiển thị trong metadata (theo đặc tả mục 2.1)
+    assert keys[0]["key_usage"] == "ENCRYPT_DECRYPT"
 
 
 def test_revoke_key_success(transit_engine):
     transit_engine.create_key("my-key", OWNER)
     transit_engine.revoke_key("my-key", OWNER)
     keys = transit_engine.list_keys(OWNER)
-    assert keys[0]["is_revoked"] is True
+    revoked = next(k for k in keys if k["key_name"] == "my-key")
+    assert revoked["is_revoked"] is True
+
+
+def test_revoke_signing_key_success(transit_engine):
+    """revoke_key() phải hoạt động với cả khóa ký bất đối xứng."""
+    transit_engine.create_signing_key("sig-key", OWNER, "Ed25519")
+    transit_engine.revoke_key("sig-key", OWNER)
+    keys = transit_engine.list_keys(OWNER)
+    revoked = next(k for k in keys if k["key_name"] == "sig-key")
+    assert revoked["is_revoked"] is True
+    # Verify sign is rejected after revoke
+    with pytest.raises(KeyRevokedError):
+        transit_engine.sign("sig-key", b"test", OWNER)
+
+
+def test_list_keys_includes_signing_keys(transit_engine):
+    """list_keys() phải trả về cả khóa đối xứng lẫn khóa ký với đúng key_usage."""
+    transit_engine.create_key("enc-key", OWNER)
+    transit_engine.create_signing_key("sig-key", OWNER, "Ed25519")
+    keys = transit_engine.list_keys(OWNER)
+    assert len(keys) == 2
+    usages = {k["key_name"]: k["key_usage"] for k in keys}
+    assert usages["enc-key"] == "ENCRYPT_DECRYPT"
+    assert usages["sig-key"] == "SIGN_VERIFY"
 
 
 def test_revoke_key_not_found(transit_engine):

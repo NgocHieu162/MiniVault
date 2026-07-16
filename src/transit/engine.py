@@ -143,43 +143,62 @@ class TransitEngine:
         self._save_storage(data)
 
     def list_keys(self, owner_email: str) -> List[Dict[str, Any]]:
-        """Lists metadata of all keys (including revoked) owned by the specified email.
+        """Lists metadata of all keys (symmetric and signing, including revoked) owned by the specified email.
 
         Args:
             owner_email: The email of the key owner.
 
         Returns:
-            A list of dicts containing key metadata (NO plaintext key material is ever included).
+            A list of dicts containing key metadata including key_usage.
+            NO plaintext or encrypted key material is ever included.
         """
         data = self._load_storage()
         result = []
+        # Symmetric encryption keys
         for raw in data["keys"].values():
             if raw["owner_email"] == owner_email:
-                # Never expose encrypted or plaintext key material
                 result.append({
                     "key_name": raw["key_name"],
                     "owner_email": raw["owner_email"],
+                    "key_usage": raw.get("key_usage", "ENCRYPT_DECRYPT"),
+                    "created_at": raw["created_at"],
+                    "is_revoked": raw["is_revoked"],
+                })
+        # Asymmetric signing keys
+        for raw in data["signing_keys"].values():
+            if raw["owner_email"] == owner_email:
+                result.append({
+                    "key_name": raw["key_name"],
+                    "owner_email": raw["owner_email"],
+                    "key_usage": raw.get("key_usage", "SIGN_VERIFY"),
+                    "algorithm": raw.get("algorithm") or raw.get("signing_algorithm"),
                     "created_at": raw["created_at"],
                     "is_revoked": raw["is_revoked"],
                 })
         return result
 
     def revoke_key(self, key_name: str, owner_email: str) -> None:
-        """Revokes a key, making it permanently unusable for further operations.
+        """Revokes a key (symmetric or signing), making it permanently unusable for further operations.
 
         Args:
             key_name: The name of the key to revoke.
             owner_email: The email of the caller (must match the key owner).
 
         Raises:
-            KeyNotFoundError: If the key does not exist.
+            KeyNotFoundError: If the key does not exist in either key store.
             PermissionDeniedError: If the caller is not the owner.
         """
         data = self._load_storage()
-        record = self._get_key_record(key_name)
-        self._assert_owner(key_name, record.owner_email, owner_email)
-
-        data["keys"][key_name]["is_revoked"] = True
+        if key_name in data["keys"]:
+            record = KeyRecord.from_dict(data["keys"][key_name])
+            self._assert_owner(key_name, record.owner_email, owner_email)
+            data["keys"][key_name]["is_revoked"] = True
+        elif key_name in data["signing_keys"]:
+            record = SigningKeyRecord.from_dict(data["signing_keys"][key_name])
+            self._assert_owner(key_name, record.owner_email, owner_email)
+            data["signing_keys"][key_name]["is_revoked"] = True
+        else:
+            raise KeyNotFoundError(f"Key '{key_name}' not found")
         self._save_storage(data)
 
     def rotate_key(self, key_name: str, owner_email: str) -> int:
