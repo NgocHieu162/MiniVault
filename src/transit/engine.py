@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import time
 from typing import Any, Dict, List
 
 from cryptography.exceptions import InvalidSignature
@@ -76,9 +77,23 @@ class TransitEngine:
             raise KeyNotFoundError(f"Signing key '{key_name}' not found")
         return SigningKeyRecord.from_dict(data["signing_keys"][key_name])
 
-    def _assert_owner(self, record_email: str, caller_email: str) -> None:
+    def _log_denied_attempt(self, email: str, key_name: str) -> None:
+        """Logs a denied access attempt to the audit log file."""
+        log_dir = "data/logs"
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "audit.log")
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        log_line = f"[{timestamp}] ACCESS_DENIED: User '{email}' attempted to access key '{key_name}'\n"
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(log_line)
+        except IOError:
+            pass
+
+    def _assert_owner(self, key_name: str, record_email: str, caller_email: str) -> None:
         """Raises PermissionDeniedError if the caller is not the key owner."""
         if record_email != caller_email:
+            self._log_denied_attempt(caller_email, key_name)
             raise PermissionDeniedError(
                 f"Access denied: caller '{caller_email}' is not the owner of this key"
             )
@@ -162,7 +177,7 @@ class TransitEngine:
         """
         data = self._load_storage()
         record = self._get_key_record(key_name)
-        self._assert_owner(record.owner_email, owner_email)
+        self._assert_owner(key_name, record.owner_email, owner_email)
 
         data["keys"][key_name]["is_revoked"] = True
         self._save_storage(data)
@@ -191,7 +206,7 @@ class TransitEngine:
 
         data = self._load_storage()
         record = self._get_key_record(key_name)
-        self._assert_owner(record.owner_email, owner_email)
+        self._assert_owner(key_name, record.owner_email, owner_email)
         if record.is_revoked:
             raise KeyRevokedError(f"Key '{key_name}' has been revoked and cannot be rotated")
 
@@ -233,7 +248,7 @@ class TransitEngine:
             PermissionDeniedError: If the caller is not the owner.
         """
         record = self._get_key_record(key_name)
-        self._assert_owner(record.owner_email, owner_email)
+        self._assert_owner(key_name, record.owner_email, owner_email)
         if record.is_revoked:
             raise KeyRevokedError(f"Key '{key_name}' has been revoked")
 
@@ -273,7 +288,7 @@ class TransitEngine:
             ValueError: If the ciphertext format is invalid.
         """
         record = self._get_key_record(key_name)
-        self._assert_owner(record.owner_email, owner_email)
+        self._assert_owner(key_name, record.owner_email, owner_email)
         if record.is_revoked:
             raise KeyRevokedError(f"Key '{key_name}' has been revoked")
 
@@ -390,7 +405,7 @@ class TransitEngine:
             raise ValueError("Invalid digest length. DIGEST message must be exactly 32 bytes (SHA-256)")
 
         record = self._get_signing_key_record(key_name)
-        self._assert_owner(record.owner_email, owner_email)
+        self._assert_owner(key_name, record.owner_email, owner_email)
         if record.is_revoked:
             raise KeyRevokedError(f"Signing key '{key_name}' has been revoked")
 
@@ -459,7 +474,7 @@ class TransitEngine:
             raise ValueError("Invalid digest length. DIGEST message must be exactly 32 bytes (SHA-256)")
 
         record = self._get_signing_key_record(key_name)
-        self._assert_owner(record.owner_email, owner_email)
+        self._assert_owner(key_name, record.owner_email, owner_email)
         # Note: verify uses only the public key (plaintext PEM), so the vault does NOT need to be unlocked.
 
         public_key = serialization.load_pem_public_key(record.public_key_pem.encode("ascii"))
