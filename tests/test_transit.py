@@ -226,3 +226,44 @@ def test_key_rotation_backward_compatibility(transit_engine):
     
     # Verify legacy decrypt works (resolves as version 1 internally)
     assert transit_engine.decrypt("legacy-key", ciphertext, OWNER) == b"Legacy data"
+
+
+# ---------------------------------------------------------------------
+# Key Usage Mismatches & DIGEST Message Types (Required Spec Cases)
+# ---------------------------------------------------------------------
+
+def test_key_usage_mismatch_rejected(transit_engine):
+    from src.transit.exceptions import InvalidKeyUsageError
+    
+    transit_engine.create_key("enc-key", OWNER)
+    transit_engine.create_signing_key("sig-key", OWNER, "Ed25519")
+
+    # 1. Calling encrypt/decrypt on a signing key name
+    with pytest.raises(InvalidKeyUsageError):
+        transit_engine.encrypt("sig-key", b"plaintext", OWNER)
+        
+    # 2. Calling sign/verify on an encryption key name
+    with pytest.raises(InvalidKeyUsageError):
+        transit_engine.sign("enc-key", b"message", OWNER)
+
+
+def test_digest_message_type_validation(transit_engine):
+    transit_engine.create_signing_key("sig-key-rsa", OWNER, "RSA-2048")
+    transit_engine.create_signing_key("sig-key-ed", OWNER, "Ed25519")
+    
+    valid_digest = b"A" * 32
+    invalid_digest = b"A" * 31
+    
+    # 1. Verification of invalid digest size must fail
+    with pytest.raises(ValueError, match="Invalid digest length"):
+        transit_engine.sign("sig-key-rsa", invalid_digest, OWNER, message_type="DIGEST")
+
+    # 2. RSA Sign and Verify with valid precomputed digest
+    sig_rsa = transit_engine.sign("sig-key-rsa", valid_digest, OWNER, message_type="DIGEST")
+    assert transit_engine.verify("sig-key-rsa", valid_digest, sig_rsa, OWNER, message_type="DIGEST") is True
+    assert transit_engine.verify("sig-key-rsa", b"B" * 32, sig_rsa, OWNER, message_type="DIGEST") is False
+
+    # 3. Ed25519 Sign and Verify with valid precomputed digest
+    sig_ed = transit_engine.sign("sig-key-ed", valid_digest, OWNER, message_type="DIGEST")
+    assert transit_engine.verify("sig-key-ed", valid_digest, sig_ed, OWNER, message_type="DIGEST") is True
+

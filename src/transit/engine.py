@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ed25519, padding, rsa
+from cryptography.hazmat.primitives.asymmetric import ed25519, padding, rsa, utils
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from src.core.vault import VaultManager
@@ -55,16 +55,24 @@ class TransitEngine:
         os.replace(tmp_path, self.storage_path)
 
     def _get_key_record(self, key_name: str) -> KeyRecord:
-        """Retrieves a KeyRecord from storage, raising KeyNotFoundError if missing."""
+        """Retrieves a KeyRecord from storage, raising KeyNotFoundError or InvalidKeyUsageError."""
         data = self._load_storage()
         if key_name not in data["keys"]:
+            if key_name in data.get("signing_keys", {}):
+                raise InvalidKeyUsageError(
+                    f"Key '{key_name}' exists but its key_usage is 'SIGN_VERIFY', not 'ENCRYPT_DECRYPT'"
+                )
             raise KeyNotFoundError(f"Key '{key_name}' not found")
         return KeyRecord.from_dict(data["keys"][key_name])
 
     def _get_signing_key_record(self, key_name: str) -> SigningKeyRecord:
-        """Retrieves a SigningKeyRecord from storage, raising KeyNotFoundError if missing."""
+        """Retrieves a SigningKeyRecord from storage, raising KeyNotFoundError or InvalidKeyUsageError."""
         data = self._load_storage()
         if key_name not in data["signing_keys"]:
+            if key_name in data.get("keys", {}):
+                raise InvalidKeyUsageError(
+                    f"Key '{key_name}' exists but its key_usage is 'ENCRYPT_DECRYPT', not 'SIGN_VERIFY'"
+                )
             raise KeyNotFoundError(f"Signing key '{key_name}' not found")
         return SigningKeyRecord.from_dict(data["signing_keys"][key_name])
 
@@ -356,13 +364,14 @@ class TransitEngine:
         data["signing_keys"][key_name] = record.to_dict()
         self._save_storage(data)
 
-    def sign(self, key_name: str, message: bytes, owner_email: str) -> bytes:
+    def sign(self, key_name: str, message: bytes, owner_email: str, message_type: str = "RAW") -> bytes:
         """Signs a message using the private key of the named asymmetric key.
 
         Args:
             key_name: The name of the signing key.
-            message: The message bytes to sign.
+            message: The message bytes to sign (or precomputed 32-byte digest if message_type is DIGEST).
             owner_email: The email of the caller (must match the key owner).
+            message_type: Either 'RAW' (default, hashes before signing) or 'DIGEST' (precomputed hash).
 
         Returns:
             The raw signature bytes.
@@ -372,7 +381,14 @@ class TransitEngine:
             KeyNotFoundError: If the key does not exist.
             KeyRevokedError: If the key has been revoked.
             PermissionDeniedError: If the caller is not the owner.
+            ValueError: If message_type is invalid or digest length is incorrect.
         """
+        if message_type not in ("RAW", "DIGEST"):
+            raise ValueError("Invalid message_type. Must be 'RAW' or 'DIGEST'")
+
+        if message_type == "DIGEST" and len(message) != 32:
+            raise ValueError("Invalid digest length. DIGEST message must be exactly 32 bytes (SHA-256)")
+
         record = self._get_signing_key_record(key_name)
         self._assert_owner(record.owner_email, owner_email)
         if record.is_revoked:
@@ -383,28 +399,49 @@ class TransitEngine:
 
         if record.algorithm == "Ed25519":
             private_key = ed25519.Ed25519PrivateKey.from_private_bytes(private_bytes)
+            # Ed25519 signs the bytes directly, whether RAW or pre-computed DIGEST
             return private_key.sign(message)
         elif record.algorithm == "RSA-2048":
             private_key = serialization.load_pem_private_key(private_bytes, password=None)
-            return private_key.sign(
-                message,
-                padding.PSS(
-                    mgf=padding.MGF1(hashes.SHA256()),
-                    salt_length=padding.PSS.MAX_LENGTH,
-                ),
-                hashes.SHA256(),
-            )
+            
+            if message_type == "DIGEST":
+                # For precomputed digests in cryptography, use utils.Prehashed
+                return private_key.sign(
+                    message,
+                    padding.PSS(
+                        mgf=padding.MGF1(hashes.SHA256()),
+                        salt_length=padding.PSS.MAX_LENGTH,
+                    ),
+                    utils.Prehashed(hashes.SHA256()),
+                )
+            else:
+                return private_key.sign(
+                    message,
+                    padding.PSS(
+                        mgf=padding.MGF1(hashes.SHA256()),
+                        salt_length=padding.PSS.MAX_LENGTH,
+                    ),
+                    hashes.SHA256(),
+                )
         else:
             raise InvalidKeyUsageError(f"Unsupported algorithm for sign: '{record.algorithm}'")
 
-    def verify(self, key_name: str, message: bytes, signature: bytes, owner_email: str) -> bool:
+    def verify(
+        self,
+        key_name: str,
+        message: bytes,
+        signature: bytes,
+        owner_email: str,
+        message_type: str = "RAW",
+    ) -> bool:
         """Verifies a signature against a message using the public key of the named asymmetric key.
 
         Args:
             key_name: The name of the signing key.
-            message: The message bytes that were originally signed.
+            message: The message bytes (or precomputed 32-byte digest if message_type is DIGEST).
             signature: The signature bytes to verify.
             owner_email: The email of the caller (must match the key owner).
+            message_type: Either 'RAW' (default) or 'DIGEST'.
 
         Returns:
             True if the signature is valid, False otherwise.
@@ -413,7 +450,14 @@ class TransitEngine:
         Raises:
             KeyNotFoundError: If the key does not exist.
             PermissionDeniedError: If the caller is not the owner.
+            ValueError: If message_type is invalid or digest length is incorrect.
         """
+        if message_type not in ("RAW", "DIGEST"):
+            raise ValueError("Invalid message_type. Must be 'RAW' or 'DIGEST'")
+
+        if message_type == "DIGEST" and len(message) != 32:
+            raise ValueError("Invalid digest length. DIGEST message must be exactly 32 bytes (SHA-256)")
+
         record = self._get_signing_key_record(key_name)
         self._assert_owner(record.owner_email, owner_email)
         # Note: verify uses only the public key (plaintext PEM), so the vault does NOT need to be unlocked.
@@ -424,15 +468,26 @@ class TransitEngine:
             if record.algorithm == "Ed25519":
                 public_key.verify(signature, message)
             elif record.algorithm == "RSA-2048":
-                public_key.verify(
-                    signature,
-                    message,
-                    padding.PSS(
-                        mgf=padding.MGF1(hashes.SHA256()),
-                        salt_length=padding.PSS.MAX_LENGTH,
-                    ),
-                    hashes.SHA256(),
-                )
+                if message_type == "DIGEST":
+                    public_key.verify(
+                        signature,
+                        message,
+                        padding.PSS(
+                            mgf=padding.MGF1(hashes.SHA256()),
+                            salt_length=padding.PSS.MAX_LENGTH,
+                        ),
+                        utils.Prehashed(hashes.SHA256()),
+                    )
+                else:
+                    public_key.verify(
+                        signature,
+                        message,
+                        padding.PSS(
+                            mgf=padding.MGF1(hashes.SHA256()),
+                            salt_length=padding.PSS.MAX_LENGTH,
+                        ),
+                        hashes.SHA256(),
+                    )
             else:
                 raise InvalidKeyUsageError(f"Unsupported algorithm for verify: '{record.algorithm}'")
             return True
