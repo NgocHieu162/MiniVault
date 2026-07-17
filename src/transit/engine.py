@@ -107,10 +107,22 @@ class TransitEngine:
         self._save_storage(data)
 
     def encrypt(self, key_name: str, plaintext: bytes, owner_email: str) -> str:
-        raise NotImplementedError("encrypt is not implemented yet")
+        record = self._get_key_record(key_name)
+        named_key = self._decrypt_bytes_with_dek(record.encrypted_key_b64)
+        nonce = os.urandom(NONCE_SIZE)
+        ciphertext = AESGCM(named_key).encrypt(nonce, plaintext, associated_data=None)
+        payload = base64.b64encode(nonce + ciphertext).decode("ascii")
+        return f"vault:{key_name}:{payload}"
 
     def decrypt(self, key_name: str, ciphertext: str, owner_email: str) -> bytes:
-        raise NotImplementedError("decrypt is not implemented yet")
+        record = self._get_key_record(key_name)
+        parts = ciphertext.split(":")
+        if len(parts) != 3 or parts[0] != "vault" or parts[1] != key_name:
+            raise ValueError(f"Invalid ciphertext format. Expected 'vault:{key_name}:<base64>'")
+        payload = base64.b64decode(parts[2])
+        nonce, ct = payload[:NONCE_SIZE], payload[NONCE_SIZE:]
+        named_key = self._decrypt_bytes_with_dek(record.encrypted_key_b64)
+        return AESGCM(named_key).decrypt(nonce, ct, associated_data=None)
 
     def create_signing_key(self, key_name: str, owner_email: str, algorithm: str = "Ed25519") -> None:
         raise NotImplementedError("create_signing_key is not implemented yet")
