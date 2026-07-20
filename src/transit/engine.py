@@ -103,11 +103,15 @@ class TransitEngine:
     def revoke_key(self, key_name: str, owner_email: str) -> None:
         data = self._load_storage()
         record = self._get_key_record(key_name)
+        self._assert_owner(record.owner_email, owner_email)
         data["keys"][key_name]["is_revoked"] = True
         self._save_storage(data)
 
     def encrypt(self, key_name: str, plaintext: bytes, owner_email: str) -> str:
         record = self._get_key_record(key_name)
+        self._assert_owner(record.owner_email, owner_email)
+        if record.is_revoked:
+            raise KeyRevokedError(f"Key '{key_name}' has been revoked")
         named_key = self._decrypt_bytes_with_dek(record.encrypted_key_b64)
         nonce = os.urandom(NONCE_SIZE)
         ciphertext = AESGCM(named_key).encrypt(nonce, plaintext, associated_data=None)
@@ -116,6 +120,9 @@ class TransitEngine:
 
     def decrypt(self, key_name: str, ciphertext: str, owner_email: str) -> bytes:
         record = self._get_key_record(key_name)
+        self._assert_owner(record.owner_email, owner_email)
+        if record.is_revoked:
+            raise KeyRevokedError(f"Key '{key_name}' has been revoked")
         parts = ciphertext.split(":")
         if len(parts) != 3 or parts[0] != "vault" or parts[1] != key_name:
             raise ValueError(f"Invalid ciphertext format. Expected 'vault:{key_name}:<base64>'")
