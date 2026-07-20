@@ -167,6 +167,29 @@ def run_tests():
     assert ":3:" in cipher_v3
     print(f"  [OK] new encryption uses latest version 3")
 
+    # --- Verification of newly added Spec features: Key Usage & DIGEST ---
+    print("\n[SPEC VALIDATION] Key Usage Mismatches & DIGEST")
+    
+    # 1. Key usage checks
+    from src.transit.exceptions import InvalidKeyUsageError
+    try:
+        transit.encrypt("sig-key-rsa", b"plaintext", OWNER)
+        assert False, "Should have raised InvalidKeyUsageError"
+    except InvalidKeyUsageError:
+        print("  [OK] encrypting with a sign-only key successfully rejected")
+        
+    try:
+        transit.sign("rotate-key", b"message", OWNER)
+        assert False, "Should have raised InvalidKeyUsageError"
+    except InvalidKeyUsageError:
+        print("  [OK] signing with an encrypt-only key successfully rejected")
+
+    # 2. DIGEST message type signature validation
+    valid_digest = b"A" * 32
+    sig_digest = transit.sign("sig-key-rsa", valid_digest, OWNER, message_type="DIGEST")
+    assert transit.verify("sig-key-rsa", valid_digest, sig_digest, OWNER, message_type="DIGEST") is True
+    print("  [OK] DIGEST message type signing and verification matches perfectly")
+
     print("\n" + "=" * 60)
     print("ALL TESTS PASSED [OK]")
     print("=" * 60)

@@ -59,13 +59,39 @@ def test_list_keys_metadata_safety(transit_engine):
     keys = transit_engine.list_keys(OWNER)
     assert "encrypted_key_b64" not in keys[0]
     assert "keys_by_version" not in keys[0]
+    # key_usage phải được hiển thị trong metadata (theo đặc tả mục 2.1)
+    assert keys[0]["key_usage"] == "ENCRYPT_DECRYPT"
 
 
 def test_revoke_key_success(transit_engine):
     transit_engine.create_key("my-key", OWNER)
     transit_engine.revoke_key("my-key", OWNER)
     keys = transit_engine.list_keys(OWNER)
-    assert keys[0]["is_revoked"] is True
+    revoked = next(k for k in keys if k["key_name"] == "my-key")
+    assert revoked["is_revoked"] is True
+
+
+def test_revoke_signing_key_success(transit_engine):
+    """revoke_key() phải hoạt động với cả khóa ký bất đối xứng."""
+    transit_engine.create_signing_key("sig-key", OWNER, "Ed25519")
+    transit_engine.revoke_key("sig-key", OWNER)
+    keys = transit_engine.list_keys(OWNER)
+    revoked = next(k for k in keys if k["key_name"] == "sig-key")
+    assert revoked["is_revoked"] is True
+    # Verify sign is rejected after revoke
+    with pytest.raises(KeyRevokedError):
+        transit_engine.sign("sig-key", b"test", OWNER)
+
+
+def test_list_keys_includes_signing_keys(transit_engine):
+    """list_keys() phải trả về cả khóa đối xứng lẫn khóa ký với đúng key_usage."""
+    transit_engine.create_key("enc-key", OWNER)
+    transit_engine.create_signing_key("sig-key", OWNER, "Ed25519")
+    keys = transit_engine.list_keys(OWNER)
+    assert len(keys) == 2
+    usages = {k["key_name"]: k["key_usage"] for k in keys}
+    assert usages["enc-key"] == "ENCRYPT_DECRYPT"
+    assert usages["sig-key"] == "SIGN_VERIFY"
 
 
 def test_revoke_key_not_found(transit_engine):
@@ -226,3 +252,44 @@ def test_key_rotation_backward_compatibility(transit_engine):
     
     # Verify legacy decrypt works (resolves as version 1 internally)
     assert transit_engine.decrypt("legacy-key", ciphertext, OWNER) == b"Legacy data"
+
+
+# ---------------------------------------------------------------------
+# Key Usage Mismatches & DIGEST Message Types (Required Spec Cases)
+# ---------------------------------------------------------------------
+
+def test_key_usage_mismatch_rejected(transit_engine):
+    from src.transit.exceptions import InvalidKeyUsageError
+    
+    transit_engine.create_key("enc-key", OWNER)
+    transit_engine.create_signing_key("sig-key", OWNER, "Ed25519")
+
+    # 1. Calling encrypt/decrypt on a signing key name
+    with pytest.raises(InvalidKeyUsageError):
+        transit_engine.encrypt("sig-key", b"plaintext", OWNER)
+        
+    # 2. Calling sign/verify on an encryption key name
+    with pytest.raises(InvalidKeyUsageError):
+        transit_engine.sign("enc-key", b"message", OWNER)
+
+
+def test_digest_message_type_validation(transit_engine):
+    transit_engine.create_signing_key("sig-key-rsa", OWNER, "RSA-2048")
+    transit_engine.create_signing_key("sig-key-ed", OWNER, "Ed25519")
+    
+    valid_digest = b"A" * 32
+    invalid_digest = b"A" * 31
+    
+    # 1. Verification of invalid digest size must fail
+    with pytest.raises(ValueError, match="Invalid digest length"):
+        transit_engine.sign("sig-key-rsa", invalid_digest, OWNER, message_type="DIGEST")
+
+    # 2. RSA Sign and Verify with valid precomputed digest
+    sig_rsa = transit_engine.sign("sig-key-rsa", valid_digest, OWNER, message_type="DIGEST")
+    assert transit_engine.verify("sig-key-rsa", valid_digest, sig_rsa, OWNER, message_type="DIGEST") is True
+    assert transit_engine.verify("sig-key-rsa", b"B" * 32, sig_rsa, OWNER, message_type="DIGEST") is False
+
+    # 3. Ed25519 Sign and Verify with valid precomputed digest
+    sig_ed = transit_engine.sign("sig-key-ed", valid_digest, OWNER, message_type="DIGEST")
+    assert transit_engine.verify("sig-key-ed", valid_digest, sig_ed, OWNER, message_type="DIGEST") is True
+
