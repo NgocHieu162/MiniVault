@@ -64,3 +64,25 @@ class UnauthenticatedError(AuthError):
     """Raised by validate_session() when the token is missing, unknown, or
     expired. Every Feature 1 / Feature 2 endpoint must raise this BEFORE any
     permission or path check is evaluated (see Acceptance Criteria 1.2)."""
+
+# ---------------------------------------------------------------------------
+# Feature 1 — Secure Storage (KV Engine)
+# ---------------------------------------------------------------------------
+
+class PermissionDeniedError(VaultError):
+    """Raised when a valid, authenticated caller tries to touch a path/key
+    they don't own. Message must stay generic - never confirm or deny
+    whether the target path/key actually exists (Acceptance Criteria 1.2)."""
+
+
+class NotFoundError(VaultError):
+    """Raised when a path (or key_name) does not exist. NEVER raised as a
+    way to imply 'you don't have permission' - ownership mismatches must
+    always raise PermissionDeniedError instead, so the two cases stay
+    indistinguishable from the caller's point of view."""
+
+
+class IntegrityError(VaultError):
+    """Raised when AES-GCM tag verification fails on read - i.e. the
+    on-disk ciphertext/tag was tampered with. Never return partial or
+    'best effort' data in this case (Acceptance Criteria 1.1)."""

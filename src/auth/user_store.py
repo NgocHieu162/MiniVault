@@ -2,7 +2,7 @@ from typing import Dict, Optional
 
 from ..storage.vault_storage import VaultStorage
 
-DEFAULT_USERS_PATH = "data/users.json"
+DEFAULT_USERS_PATH = "storage/users.json"
 
 
 class UserStore:
