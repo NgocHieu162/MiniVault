@@ -1,3 +1,5 @@
 argon2-cffi
 cryptography
 pytest
+fastapi
+uvicorn[standard]
