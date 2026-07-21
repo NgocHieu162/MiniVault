@@ -1,7 +1,7 @@
 import json
 import os
 
-DEFAULT_PATH = os.path.join("data", "vault_meta.json")
+DEFAULT_PATH = os.path.join("storage", "vault.json")
 
 
 class VaultStorage:

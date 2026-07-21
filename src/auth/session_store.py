@@ -4,7 +4,7 @@ from typing import Callable, Dict, Optional
 
 from .exceptions import UnauthenticatedError
 
-SESSION_TTL_SECONDS = 30 * 60  # 30 minutes, per assignment spec 0.2
+SESSION_TTL_SECONDS = 30 * 60  # 30 minutes
 
 
 class SessionStore:
