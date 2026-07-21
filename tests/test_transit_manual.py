@@ -11,6 +11,8 @@ from src.storage.vault_storage import VaultStorage
 from src.transit.engine import TransitEngine
 from src.transit.exceptions import (
     KeyAlreadyExistsError,
+    KeyRevokedError,
+    PermissionDeniedError,
 )
 
 def run_tests():
@@ -43,6 +45,43 @@ def run_tests():
     assert len(keys) == 1
     assert "encrypted_key_b64" not in keys[0], "list_keys must NOT expose key material!"
     print(f"  [OK] list_keys: {keys[0]['key_name']} (is_revoked={keys[0]['is_revoked']})")
+
+    # --- Feature 2.2: Encrypt / Decrypt ---
+    print("\n[2.2] Encrypt / Decrypt as a Service")
+
+    plaintext = b"Hello, MiniVault!"
+    ciphertext = transit.encrypt("my-key", plaintext, OWNER)
+    assert ciphertext.startswith("vault:my-key:")
+    print(f"  [OK] encrypt: {ciphertext[:50]}...")
+
+    recovered = transit.decrypt("my-key", ciphertext, OWNER)
+    assert recovered == plaintext
+    print(f"  [OK] decrypt: '{recovered.decode()}'")
+
+    # --- Feature 2.3: Access Control ---
+    print("\n[2.3] Access Control")
+
+    OTHER = "attacker@example.com"
+    try:
+        transit.encrypt("my-key", b"unauthorized attempt", OTHER)
+    except PermissionDeniedError as e:
+        print(f"  [OK] encrypt (wrong owner): {e}")
+
+    try:
+        transit.decrypt("my-key", ciphertext, OTHER)
+    except PermissionDeniedError as e:
+        print(f"  [OK] decrypt (wrong owner): {e}")
+
+    # --- Revoke key and verify it blocks operations ---
+    transit.revoke_key("my-key", OWNER)
+    keys = transit.list_keys(OWNER)
+    assert keys[0]["is_revoked"] is True
+    print(f"  [OK] revoke_key: 'my-key' is_revoked=True")
+
+    try:
+        transit.encrypt("my-key", b"after revoke", OWNER)
+    except KeyRevokedError as e:
+        print(f"  [OK] encrypt after revoke: {e}")
 
 if __name__ == "__main__":
     import shutil
