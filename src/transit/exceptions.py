@@ -23,6 +23,6 @@ class PermissionDeniedError(TransitError):
     pass
 
 
-class InvalidKeyUsageException(TransitError):
+class InvalidKeyUsageError(TransitError):
     """Raised when an operation is incompatible with the key type/algorithm."""
     pass

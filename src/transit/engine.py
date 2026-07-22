@@ -50,6 +50,12 @@ class TransitEngine:
             raise KeyNotFoundError(f"Key '{key_name}' not found")
         return KeyRecord.from_dict(data["keys"][key_name])
 
+    def _get_signing_key_record(self, key_name: str) -> SigningKeyRecord:
+        data = self._load_storage()
+        if key_name not in data["signing_keys"]:
+            raise KeyNotFoundError(f"Signing key '{key_name}' not found")
+        return SigningKeyRecord.from_dict(data["signing_keys"][key_name])
+
     def _assert_owner(self, record_email: str, caller_email: str) -> None:
         if record_email != caller_email:
             raise PermissionDeniedError(
@@ -132,7 +138,44 @@ class TransitEngine:
         return AESGCM(named_key).decrypt(nonce, ct, associated_data=None)
 
     def create_signing_key(self, key_name: str, owner_email: str, algorithm: str = "Ed25519") -> None:
-        raise NotImplementedError("create_signing_key is not implemented yet")
+        if algorithm not in ("RSA-2048", "Ed25519"):
+            raise ValueError(f"Unsupported algorithm: '{algorithm}'. Use 'RSA-2048' or 'Ed25519'")
+
+        data = self._load_storage()
+        if key_name in data["signing_keys"]:
+            raise KeyAlreadyExistsError(f"Signing key '{key_name}' already exists")
+
+        if algorithm == "Ed25519":
+            private_key = ed25519.Ed25519PrivateKey.generate()
+            private_bytes = private_key.private_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PrivateFormat.Raw,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        else:  # RSA-2048
+            private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            private_bytes = private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+
+        public_key_pem = private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        ).decode("ascii")
+
+        encrypted_private_key_b64 = self._encrypt_bytes_with_dek(private_bytes)
+
+        record = SigningKeyRecord(
+            key_name=key_name,
+            owner_email=owner_email,
+            algorithm=algorithm,
+            encrypted_private_key_b64=encrypted_private_key_b64,
+            public_key_pem=public_key_pem,
+        )
+        data["signing_keys"][key_name] = record.to_dict()
+        self._save_storage(data)
 
     def sign(self, key_name: str, message: bytes, owner_email: str) -> bytes:
         raise NotImplementedError("sign is not implemented yet")
