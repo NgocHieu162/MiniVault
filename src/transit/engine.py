@@ -178,7 +178,50 @@ class TransitEngine:
         self._save_storage(data)
 
     def sign(self, key_name: str, message: bytes, owner_email: str) -> bytes:
-        raise NotImplementedError("sign is not implemented yet")
+        record = self._get_signing_key_record(key_name)
+        self._assert_owner(record.owner_email, owner_email)
+        if record.is_revoked:
+            raise KeyRevokedError(f"Signing key '{key_name}' has been revoked")
+
+        private_bytes = self._decrypt_bytes_with_dek(record.encrypted_private_key_b64)
+
+        if record.algorithm == "Ed25519":
+            private_key = ed25519.Ed25519PrivateKey.from_private_bytes(private_bytes)
+            return private_key.sign(message)
+        elif record.algorithm == "RSA-2048":
+            private_key = serialization.load_pem_private_key(private_bytes, password=None)
+            return private_key.sign(
+                message,
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH,
+                ),
+                hashes.SHA256(),
+            )
+        else:
+            raise InvalidKeyUsageError(f"Unsupported algorithm for sign: '{record.algorithm}'")
 
     def verify(self, key_name: str, message: bytes, signature: bytes, owner_email: str) -> bool:
-        raise NotImplementedError("verify is not implemented yet")
+        record = self._get_signing_key_record(key_name)
+        self._assert_owner(record.owner_email, owner_email)
+
+        public_key = serialization.load_pem_public_key(record.public_key_pem.encode("ascii"))
+
+        try:
+            if record.algorithm == "Ed25519":
+                public_key.verify(signature, message)
+            elif record.algorithm == "RSA-2048":
+                public_key.verify(
+                    signature,
+                    message,
+                    padding.PSS(
+                        mgf=padding.MGF1(hashes.SHA256()),
+                        salt_length=padding.PSS.MAX_LENGTH,
+                    ),
+                    hashes.SHA256(),
+                )
+            else:
+                raise InvalidKeyUsageError(f"Unsupported algorithm for verify: '{record.algorithm}'")
+            return True
+        except (InvalidSignature, Exception):
+            return False
