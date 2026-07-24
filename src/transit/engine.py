@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519, padding, rsa, uti
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from src.core.vault import VaultManager
+from src.core.audit_logger import AuditLogger
 
 from .exceptions import (
     InvalidKeyUsageError,
@@ -21,6 +22,7 @@ from .exceptions import (
 from .models import KeyRecord, SigningKeyRecord
 
 NONCE_SIZE = 12  # 96-bit nonce, standard size for AES-GCM
+_audit = AuditLogger()  # module-level singleton for hash-chained audit log
 
 
 class TransitEngine:
@@ -78,17 +80,9 @@ class TransitEngine:
         return SigningKeyRecord.from_dict(data["signing_keys"][key_name])
 
     def _log_denied_attempt(self, email: str, key_name: str) -> None:
-        """Logs a denied access attempt to the audit log file."""
-        log_dir = "data/logs"
-        os.makedirs(log_dir, exist_ok=True)
-        log_path = os.path.join(log_dir, "audit.log")
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        log_line = f"[{timestamp}] ACCESS_DENIED: User '{email}' attempted to access key '{key_name}'\n"
-        try:
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(log_line)
-        except IOError:
-            pass
+        """Logs a denied access attempt to the hash-chained audit log."""
+        event = f"ACCESS_DENIED: User '{email}' attempted to access key '{key_name}'"
+        _audit.log(event)
 
     def _assert_owner(self, key_name: str, record_email: str, caller_email: str) -> None:
         """Raises PermissionDeniedError if the caller is not the key owner."""
