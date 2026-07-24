@@ -1,5 +1,6 @@
 """
 Manual integration test script for the TransitEngine.
+Run with: .\\venv\\Scripts\\python.exe tests\\test_transit_manual.py
 """
 import os
 import sys
@@ -15,19 +16,22 @@ from src.transit.exceptions import (
     PermissionDeniedError,
 )
 
+
 def run_tests():
+    # --- Setup ---
     storage = VaultStorage(path="data/test_vault_meta.json")
     vault = VaultManager(storage)
     transit = TransitEngine(vault, storage_path="data/test_transit_keys.json")
     PASSPHRASE = "correct horse battery staple"
     OWNER = "member_b@example.com"
+    OTHER = "attacker@example.com"
 
     if not vault.is_initialized():
         vault.init_vault(PASSPHRASE)
     vault.unlock(PASSPHRASE)
 
     print("=" * 60)
-    print("TRANSIT ENGINE - UNIT TESTS")
+    print("TRANSIT ENGINE - INTEGRATION TESTS")
     print("=" * 60)
 
     # --- Feature 2.1: Named Key Management ---
@@ -61,7 +65,6 @@ def run_tests():
     # --- Feature 2.3: Access Control ---
     print("\n[2.3] Access Control")
 
-    OTHER = "attacker@example.com"
     try:
         transit.encrypt("my-key", b"unauthorized attempt", OTHER)
     except PermissionDeniedError as e:
@@ -83,8 +86,49 @@ def run_tests():
     except KeyRevokedError as e:
         print(f"  [OK] encrypt after revoke: {e}")
 
+    # --- Feature 2.4: Sign & Verify (Ed25519) ---
+    print("\n[2.4] Sign & Verify (Ed25519)")
+
+    transit.create_signing_key("sig-key-ed25519", OWNER, algorithm="Ed25519")
+    print("  [OK] create_signing_key: 'sig-key-ed25519'")
+
+    message = b"Transfer $100 to Alice"
+    signature = transit.sign("sig-key-ed25519", message, OWNER)
+    print(f"  [OK] sign: {len(signature)} bytes")
+
+    result = transit.verify("sig-key-ed25519", message, signature, OWNER)
+    assert result is True
+    print(f"  [OK] verify (valid signature): {result}")
+
+    result_tampered = transit.verify("sig-key-ed25519", b"Transfer $999 to Eve", signature, OWNER)
+    assert result_tampered is False
+    print(f"  [OK] verify (tampered message): {result_tampered} (correctly rejected)")
+
+    # --- Feature 2.4: Sign & Verify (RSA-2048) ---
+    print("\n[2.4] Sign & Verify (RSA-2048)")
+
+    transit.create_signing_key("sig-key-rsa", OWNER, algorithm="RSA-2048")
+    print("  [OK] create_signing_key: 'sig-key-rsa'")
+
+    signature_rsa = transit.sign("sig-key-rsa", message, OWNER)
+    print(f"  [OK] sign: {len(signature_rsa)} bytes")
+
+    result_rsa = transit.verify("sig-key-rsa", message, signature_rsa, OWNER)
+    assert result_rsa is True
+    print(f"  [OK] verify (valid signature): {result_rsa}")
+
+    result_rsa_bad = transit.verify("sig-key-rsa", b"wrong message", signature_rsa, OWNER)
+    assert result_rsa_bad is False
+    print(f"  [OK] verify (tampered message): {result_rsa_bad} (correctly rejected)")
+
+    print("\n" + "=" * 60)
+    print("ALL TESTS PASSED [OK]")
+    print("=" * 60)
+
+
 if __name__ == "__main__":
     import shutil
+    # Clean up test artifacts before running
     for f in ["data/test_vault_meta.json", "data/test_transit_keys.json"]:
         if os.path.exists(f):
             os.remove(f)
