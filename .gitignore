@@ -1,5 +1,6 @@
 .env.example
 /venv
 __pycache__/
+.coverage
 data/*
 !data/.gitkeep

@@ -28,6 +28,7 @@ from src.auth.exceptions import (
     VaultNotInitializedError,
     WeakPassphraseError,
 )
+from src.core.audit_logger import AuditLogger
 from src.core.vault import VaultManager
 from src.kv.kv_manager import KVManager
 from src.transit.engine import TransitEngine
@@ -47,6 +48,7 @@ vault = VaultManager()
 auth = AuthManager()
 transit = TransitEngine(vault_manager=vault)
 kv = KVManager(vault=vault, auth=auth)
+audit_logger = AuditLogger()
 
 # ---------------------------------------------------------------------------
 # FastAPI app
@@ -58,20 +60,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="🔐 MiniVault",
+    title="MiniVault REST API",
     description=(
-        "A lightweight cryptographic vault service.\n\n"
-        "**How to use:**\n"
-        "1. `POST /vault/init` — Initialize vault (first run only)\n"
-        "2. `POST /vault/unlock` — Unlock with master passphrase\n"
-        "3. `POST /auth/register` — Create an account\n"
-        "4. `POST /auth/login` — Get session token\n"
-        "5. Use `X-Token` header for all KV and Transit endpoints\n\n"
-        "**Features:**\n"
-        "- **Vault** — Master passphrase / DEK management (Feature 0)\n"
-        "- **Auth** — Register, login, session tokens (Feature 0.2)\n"
-        "- **KV Engine** — Encrypted secret storage at `secret/<email>/...` (Feature 1)\n"
-        "- **Transit Engine** — Encrypt/Decrypt, Sign/Verify, Key Rotation (Feature 2)\n"
+        "A lightweight cryptographic vault service providing:\n\n"
+        "- Vault Init & Unlock — Master passphrase and DEK management (Feature 0.1)\n"
+        "- Authentication — User registration, login, and lockout (Feature 0.2)\n"
+        "- KV Engine — Encrypted secret storage with versioning history (Feature 1 & Advanced)\n"
+        "- Transit Engine — Encryption, digital signatures, and key rotation as a service (Feature 2 & Advanced)\n"
+        "- Audit Logger — Tamper-evident hash-chained audit log (Advanced)\n"
     ),
     version="1.0.0",
     lifespan=lifespan,
@@ -135,6 +131,7 @@ class LoginRequest(BaseModel):
     email: str
     passphrase: str
 
+
 class KVWriteRequest(BaseModel):
     data: Dict[str, Any]
 
@@ -165,7 +162,7 @@ class VerifyRequest(BaseModel):
 # Feature 0.1 — Vault Init & Unlock
 # ---------------------------------------------------------------------------
 
-@app.get("/vault/status", tags=["🔒 Vault"], summary="Get vault status")
+@app.get("/vault/status", tags=["Vault"], summary="Get vault status")
 def vault_status():
     """Check whether the vault is initialized and locked/unlocked."""
     return {
@@ -174,7 +171,7 @@ def vault_status():
     }
 
 
-@app.post("/vault/init", tags=["🔒 Vault"], summary="Initialize vault (first run only)")
+@app.post("/vault/init", tags=["Vault"], summary="Initialize vault (first run only)")
 def vault_init(req: VaultPassphraseRequest):
     """Create the vault for the first time with a master passphrase.
 
@@ -187,7 +184,7 @@ def vault_init(req: VaultPassphraseRequest):
         raise _http(exc)
 
 
-@app.post("/vault/unlock", tags=["🔒 Vault"], summary="Unlock vault with master passphrase")
+@app.post("/vault/unlock", tags=["Vault"], summary="Unlock vault with master passphrase")
 def vault_unlock(req: VaultPassphraseRequest):
     """Derive the DEK from the master passphrase and hold it in memory.
 
@@ -200,7 +197,7 @@ def vault_unlock(req: VaultPassphraseRequest):
         raise _http(exc)
 
 
-@app.post("/vault/lock", tags=["🔒 Vault"], summary="Lock vault and wipe DEK from memory")
+@app.post("/vault/lock", tags=["Vault"], summary="Lock vault and wipe DEK from memory")
 def vault_lock():
     """Immediately wipe the in-memory DEK. All KV/Transit ops will fail until unlocked again."""
     vault.lock()
@@ -211,7 +208,7 @@ def vault_lock():
 # Feature 0.2 — Authentication
 # ---------------------------------------------------------------------------
 
-@app.post("/auth/register", tags=["👤 Auth"], summary="Register a new user account")
+@app.post("/auth/register", tags=["Authentication"], summary="Register a new user account")
 def auth_register(req: RegisterRequest):
     """Register with email + passphrase.
 
@@ -224,7 +221,7 @@ def auth_register(req: RegisterRequest):
         raise _http(exc)
 
 
-@app.post("/auth/login", tags=["👤 Auth"], summary="Login and receive a session token")
+@app.post("/auth/login", tags=["Authentication"], summary="Login and receive a session token")
 def auth_login(req: LoginRequest):
     """Returns a session **token** valid for 30 minutes.
 
@@ -238,7 +235,7 @@ def auth_login(req: LoginRequest):
         raise _http(exc)
 
 
-@app.post("/auth/logout", tags=["👤 Auth"], summary="Invalidate session token")
+@app.post("/auth/logout", tags=["Authentication"], summary="Invalidate session token")
 def auth_logout(x_token: str = Header(..., alias="X-Token")):
     """Invalidate the session token immediately."""
     try:
@@ -252,7 +249,7 @@ def auth_logout(x_token: str = Header(..., alias="X-Token")):
 # Feature 1 — KV Engine (Secure Storage)
 # ---------------------------------------------------------------------------
 
-@app.post("/kv/{path:path}", tags=["📦 KV Engine"], summary="Write (or overwrite) a secret")
+@app.post("/kv/{path:path}", tags=["KV Engine"], summary="Write (or overwrite) a secret")
 def kv_write(path: str, req: KVWriteRequest, x_token: str = Header(..., alias="X-Token")):
     """Encrypt and store a JSON object.
 
@@ -269,18 +266,35 @@ def kv_write(path: str, req: KVWriteRequest, x_token: str = Header(..., alias="X
         raise _http(exc)
 
 
-@app.get("/kv/{path:path}", tags=["📦 KV Engine"], summary="Read and decrypt a secret")
-def kv_read(path: str, x_token: str = Header(..., alias="X-Token")):
-    """Decrypt and return the JSON object stored at the given path."""
+@app.get("/kv/{path:path}", tags=["KV Engine"], summary="Read and decrypt a secret")
+def kv_read(path: str, x_token: str = Header(..., alias="X-Token"), version: Optional[int] = None):
+    """Decrypt and return the JSON object stored at the given path.
+
+    **Advanced (KV Versioning)**: Pass `?version=1` to retrieve a historical version.
+    Omit `version` to always get the latest.
+    """
     full_path = f"secret/{path}" if not path.startswith("secret/") else path
     try:
-        data = kv.read(full_path, x_token)
-        return {"path": full_path, "data": data}
+        data = kv.read(full_path, x_token, version=version)
+        return {"path": full_path, "data": data, "version": version or "latest"}
     except Exception as exc:
         raise _http(exc)
 
 
-@app.delete("/kv/{path:path}", tags=["📦 KV Engine"], summary="Delete a secret")
+@app.get("/kv-versions/{path:path}", tags=["KV Engine"], summary="[Versioning] List all versions of a secret [Advanced]")
+def kv_list_versions(path: str, x_token: str = Header(..., alias="X-Token")):
+    """List all historical versions of a secret with their timestamps.
+
+    Does **not** decrypt any data — only returns metadata.
+    """
+    full_path = f"secret/{path}" if not path.startswith("secret/") else path
+    try:
+        return kv.list_versions(full_path, x_token)
+    except Exception as exc:
+        raise _http(exc)
+
+
+@app.delete("/kv/{path:path}", tags=["KV Engine"], summary="Delete a secret")
 def kv_delete(path: str, x_token: str = Header(..., alias="X-Token")):
     """Permanently delete the secret at the given path."""
     full_path = f"secret/{path}" if not path.startswith("secret/") else path
@@ -295,7 +309,7 @@ def kv_delete(path: str, x_token: str = Header(..., alias="X-Token")):
 # Feature 2.1 — Transit: Named Key Management
 # ---------------------------------------------------------------------------
 
-@app.get("/transit/keys", tags=["🔑 Transit — Keys"], summary="List all keys you own")
+@app.get("/transit/keys", tags=["Transit - Keys"], summary="List all keys you own")
 def transit_list_keys(x_token: str = Header(..., alias="X-Token")):
     """Returns metadata (name, key_usage, algorithm, is_revoked) for all keys owned by the caller.
     Does **not** include any plaintext or encrypted key material.
@@ -308,7 +322,7 @@ def transit_list_keys(x_token: str = Header(..., alias="X-Token")):
         raise _http(exc)
 
 
-@app.post("/transit/keys", tags=["🔑 Transit — Keys"], summary="Create a symmetric AES-256 key")
+@app.post("/transit/keys", tags=["Transit - Keys"], summary="Create a symmetric AES-256 key")
 def transit_create_key(req: CreateKeyRequest, x_token: str = Header(..., alias="X-Token")):
     """Create a named symmetric key (AES-256-GCM) for encryption/decryption (`key_usage: ENCRYPT_DECRYPT`)."""
     try:
@@ -319,7 +333,7 @@ def transit_create_key(req: CreateKeyRequest, x_token: str = Header(..., alias="
         raise _http(exc)
 
 
-@app.post("/transit/signing-keys", tags=["🔑 Transit — Keys"], summary="Create an asymmetric signing key pair")
+@app.post("/transit/signing-keys", tags=["Transit - Keys"], summary="Create an asymmetric signing key pair")
 def transit_create_signing_key(req: CreateSigningKeyRequest, x_token: str = Header(..., alias="X-Token")):
     """Create a named asymmetric key pair (`key_usage: SIGN_VERIFY`).
 
@@ -338,7 +352,7 @@ def transit_create_signing_key(req: CreateSigningKeyRequest, x_token: str = Head
         raise _http(exc)
 
 
-@app.delete("/transit/keys/{key_name}", tags=["🔑 Transit — Keys"], summary="Revoke a key (symmetric or signing)")
+@app.delete("/transit/keys/{key_name}", tags=["Transit - Keys"], summary="Revoke a key (symmetric or signing)")
 def transit_revoke_key(key_name: str, x_token: str = Header(..., alias="X-Token")):
     """Permanently revoke a key. Works for both symmetric and signing keys.
     After revocation the key **cannot** be used for any operation.
@@ -351,7 +365,7 @@ def transit_revoke_key(key_name: str, x_token: str = Header(..., alias="X-Token"
         raise _http(exc)
 
 
-@app.post("/transit/keys/{key_name}/rotate", tags=["🔑 Transit — Keys"], summary="Rotate a symmetric key [Advanced]")
+@app.post("/transit/keys/{key_name}/rotate", tags=["Transit - Keys"], summary="Rotate a symmetric key [Advanced]")
 def transit_rotate_key(key_name: str, x_token: str = Header(..., alias="X-Token")):
     """Generate a **new key version** while keeping all older versions.
 
@@ -370,7 +384,7 @@ def transit_rotate_key(key_name: str, x_token: str = Header(..., alias="X-Token"
 # Feature 2.2 — Transit: Encrypt / Decrypt as a Service
 # ---------------------------------------------------------------------------
 
-@app.post("/transit/encrypt/{key_name}", tags=["🔐 Transit — Encrypt/Decrypt"], summary="Encrypt plaintext")
+@app.post("/transit/encrypt/{key_name}", tags=["Transit - Encrypt/Decrypt"], summary="Encrypt plaintext")
 def transit_encrypt(key_name: str, req: EncryptRequest, x_token: str = Header(..., alias="X-Token")):
     """Encrypt a UTF-8 string using the named AES-256-GCM key.
 
@@ -385,7 +399,7 @@ def transit_encrypt(key_name: str, req: EncryptRequest, x_token: str = Header(..
         raise _http(exc)
 
 
-@app.post("/transit/decrypt/{key_name}", tags=["🔐 Transit — Encrypt/Decrypt"], summary="Decrypt ciphertext")
+@app.post("/transit/decrypt/{key_name}", tags=["Transit - Encrypt/Decrypt"], summary="Decrypt ciphertext")
 def transit_decrypt(key_name: str, req: DecryptRequest, x_token: str = Header(..., alias="X-Token")):
     """Decrypt a `vault:...` ciphertext string. Returns the original UTF-8 plaintext."""
     try:
@@ -400,7 +414,7 @@ def transit_decrypt(key_name: str, req: DecryptRequest, x_token: str = Header(..
 # Feature 2.4 — Transit: Sign / Verify as a Service
 # ---------------------------------------------------------------------------
 
-@app.post("/transit/sign/{key_name}", tags=["✍️ Transit — Sign/Verify"], summary="Sign a message")
+@app.post("/transit/sign/{key_name}", tags=["Transit - Sign/Verify"], summary="Sign a message")
 def transit_sign(key_name: str, req: SignRequest, x_token: str = Header(..., alias="X-Token")):
     """Sign a message using an asymmetric key (Ed25519 or RSA-2048).
 
@@ -418,7 +432,7 @@ def transit_sign(key_name: str, req: SignRequest, x_token: str = Header(..., ali
         raise _http(exc)
 
 
-@app.post("/transit/verify/{key_name}", tags=["✍️ Transit — Sign/Verify"], summary="Verify a signature")
+@app.post("/transit/verify/{key_name}", tags=["Transit - Sign/Verify"], summary="Verify a signature")
 def transit_verify(key_name: str, req: VerifyRequest, x_token: str = Header(..., alias="X-Token")):
     """Verify a hex signature against a message.
 
@@ -431,6 +445,41 @@ def transit_verify(key_name: str, req: VerifyRequest, x_token: str = Header(...,
         sig = bytes.fromhex(req.signature_hex)
         valid = transit.verify(key_name, msg, sig, email, message_type=req.message_type)
         return {"valid": valid}
+    except Exception as exc:
+        raise _http(exc)
+
+
+# ---------------------------------------------------------------------------
+# Advanced Feature 3 — Audit Log Integrity Verification
+# ---------------------------------------------------------------------------
+
+@app.get("/audit/log", tags=["Audit Log"], summary="[Hash-Chain] View recent audit log entries [Advanced]")
+def audit_view(limit: int = 20, x_token: str = Header(..., alias="X-Token")):
+    """Return the last `limit` entries from the hash-chained audit log.
+
+    Each entry contains: `index`, `timestamp`, `event`, `prev_hash`, `hash`.
+    The hash chain allows detection of any tampering.
+    """
+    try:
+        auth.validate_session(x_token)
+        entries = audit_logger.get_entries(limit=limit)
+        return {"entries": entries, "count": len(entries)}
+    except Exception as exc:
+        raise _http(exc)
+
+
+@app.get("/audit/verify", tags=["Audit Log"], summary="[Hash-Chain] Verify audit log integrity [Advanced]")
+def audit_verify(x_token: str = Header(..., alias="X-Token")):
+    """Verify the integrity of the entire hash-chained audit log.
+
+    Returns `"intact": true` if no tampering is detected.
+    If any log entry has been modified or deleted, reports the exact index
+    where the hash chain breaks.
+    """
+    try:
+        auth.validate_session(x_token)
+        result = audit_logger.verify_integrity()
+        return result
     except Exception as exc:
         raise _http(exc)
 
