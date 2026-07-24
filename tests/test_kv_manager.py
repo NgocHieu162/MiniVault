@@ -237,8 +237,15 @@ def _flip_field_on_disk(kv_storage_path, path: str, field: str) -> None:
     raw = json.loads(kv_storage_path.read_text(encoding="utf-8"))
     record = raw["records"][path]
 
-    corrupted = bytearray(base64.b64decode(record[field]))
+    # Support new versioned storage format: blob is inside versions["1"]
+    if "versions" in record:
+        blob = record["versions"]["1"]
+    else:
+        blob = record
+
+    corrupted = bytearray(base64.b64decode(blob[field]))
     corrupted[0] ^= 0xFF
-    record[field] = base64.b64encode(bytes(corrupted)).decode("ascii")
+    blob[field] = base64.b64encode(bytes(corrupted)).decode("ascii")
 
     kv_storage_path.write_text(json.dumps(raw), encoding="utf-8")
+
