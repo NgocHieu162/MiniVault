@@ -5,7 +5,7 @@ Docs: http://127.0.0.1:8000/docs
 """
 
 from contextlib import asynccontextmanager
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
